@@ -1,0 +1,37 @@
+name: VOAT Scraper Scheduler
+
+on:
+  schedule:
+    # 1時間ごとに実行 (混雑を避けるため中途半端な「毎時27分」に実行)
+    - cron: '27 * * * *'
+  workflow_dispatch: # 手動実行ボタンも追加
+
+jobs:
+  scrape-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Create service-account.json
+        run: echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > service-account.json
+
+      - name: Run Scraper
+        run: npm start
+        env:
+          VOAT_LOGIN_ID: ${{ secrets.VOAT_LOGIN_ID }}
+          VOAT_PASSWORD: ${{ secrets.VOAT_PASSWORD }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: ./service-account.json
