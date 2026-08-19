@@ -38,14 +38,22 @@ async function extractCurrentDateReservations(page, expectedAriaLabel) {
 
       const typeEl = lessonCell.querySelector('.td-lesson-cat');
       const type = typeEl ? typeEl.innerText.trim() : '';
-      if (!type) return; // 空枠はスキップ
-
+      
       // レッスン欄の全テキストを取得（PERSONAL/GROUP/EVENT も含む）
-      const rawText = lessonCell.innerText.trim();
-      const title = rawText
+      let rawText = lessonCell.innerText.trim();
+      if (!rawText || rawText === '受付中' || rawText === '予約可' || rawText === '空き') return; // 空枠はスキップ
+
+      // 不要なボタンUIテキスト（欠席フォロー動画を送信する等）を除去
+      rawText = rawText
+        .replace(/欠席フォロー動画を送信する\s*>>/g, '')
+        .replace(/動画を送信する\s*>>/g, '')
         .replace(/\n+/g, ' ')       // 改行をスペースに
         .replace(/\s{2,}/g, ' ')     // 連続スペースを1つに
-        .trim() || 'レッスン';
+        .trim();
+
+      if (!rawText) return;
+
+      const title = rawText || 'レッスン';
 
       // 個別データも保持（description用）
       const bikouEls = lessonCell.querySelectorAll('.td-lesson-bikou');
@@ -59,7 +67,7 @@ async function extractCurrentDateReservations(page, expectedAriaLabel) {
   });
 }
 
-// 現在表示中の月の予約可能日を取得
+// 現在表示中の月のすべての日付を取得（1日も漏らさず全走査）
 async function getReservableDates(page) {
   return await page.evaluate(() => {
     const days = document.querySelectorAll('.flatpickr-day:not(.prevMonthDay):not(.nextMonthDay)');
@@ -67,13 +75,9 @@ async function getReservableDates(page) {
       .map(el => {
         const ariaLabel = el.getAttribute('aria-label') || '';
         const dayNumber = parseInt(el.textContent.trim(), 10);
-        const hasLesson = el.classList.contains('js-modal-reserve-open') ||
-                          el.classList.contains('js-modal-lesson-open') ||
-                          el.classList.contains('has-lesson') ||
-                          el.classList.contains('reserved');
-        return { ariaLabel, dayNumber, hasLesson };
+        return { ariaLabel, dayNumber };
       })
-      .filter(item => item.ariaLabel && !isNaN(item.dayNumber) && item.hasLesson);
+      .filter(item => item.ariaLabel && !isNaN(item.dayNumber));
   });
 }
 
@@ -95,7 +99,7 @@ async function selectDateAndWait(page, selector, dayNumber) {
       }, dayNumber, { timeout: 8000 });
 
       // テーブル描画の安定化のため少し待機
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(400);
       return true;
     } catch (e) {
       console.warn(`    ⚠️ 日付選択待機リトライ (${attempt}/3): day=${dayNumber}`);
@@ -111,7 +115,7 @@ async function processMonth(page) {
   const dates = await getReservableDates(page);
   if (dates.length === 0) return results;
 
-  console.log(`  ${dates.length} 件の日付を処理中...`);
+  console.log(`  当月全 ${dates.length} 日を完全走査中...`);
   for (const item of dates) {
     const selector = `.flatpickr-day:not(.prevMonthDay):not(.nextMonthDay)[aria-label="${item.ariaLabel}"]`;
     const ok = await selectDateAndWait(page, selector, item.dayNumber);
@@ -131,7 +135,7 @@ async function processMonth(page) {
 
       results.push(...extractResult.data);
       if (extractResult.data.length > 0) {
-        console.log(`    ${extractResult.fullDate} (${item.ariaLabel}): ${extractResult.data.length} 件のレッスン`);
+        console.log(`    ✅ ${extractResult.fullDate} (${item.ariaLabel}): ${extractResult.data.length} 件のレッスン抽出`);
       }
     }
   }
@@ -204,8 +208,6 @@ async function processMonth(page) {
     }
 
     console.log(`\n=== 全抽出結果: ${allReservations.length} 件 ===`);
-    console.log(JSON.stringify(allReservations, null, 2));
-    console.log('================================\n');
 
     // ===== Google Calendar 連携 =====
     if (!process.env.GOOGLE_CALENDAR_ID || !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -259,10 +261,8 @@ async function processMonth(page) {
         console.log(`\n既存イベント ${existingEvents.length} 件をすべて削除中...`);
         for (const ev of existingEvents) {
           try {
-            console.log(`  [削除] ${ev.start?.dateTime || ev.start?.date} : ${ev.summary}`);
             await calendar.events.delete({ calendarId, eventId: ev.id });
           } catch (delErr) {
-            // 既に削除済みの場合などはスキップ
             if (delErr.code !== 410) {
               console.error(`  [削除エラー] ${ev.summary}: ${delErr.message}`);
             }
