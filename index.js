@@ -25,7 +25,13 @@ async function extractCurrentDateReservations(page, expectedAriaLabel) {
     rows.forEach(row => {
       const timeText = row.querySelector('.td-date')?.innerText.trim() || '';
       let startTime = '', endTime = '';
-      if (timeText.includes('~')) {
+      
+      // 様々な波ダッシュ・ハイフンに対応（~, 〜, ～, -）
+      const timeMatch = timeText.match(/(\d{1,2}:\d{2})\s*[-~〜～]\s*(\d{1,2}:\d{2})/);
+      if (timeMatch) {
+        startTime = timeMatch[1].trim();
+        endTime = timeMatch[2].trim();
+      } else if (timeText.includes('~')) {
         const timeParts = timeText.split('~');
         startTime = timeParts[0].trim();
         endTime = timeParts[1].trim();
@@ -209,11 +215,11 @@ async function processMonth(page) {
 
     console.log(`\n=== 全抽出結果: ${allReservations.length} 件 ===`);
 
-    // ===== Google Calendar 連携 =====
+    // ===== Google Calendar 連携（差分同期・完全重複防止・自動クレンジング） =====
     if (!process.env.GOOGLE_CALENDAR_ID || !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       console.log('※ .env にGoogleカレンダーの設定がないため、カレンダー連携はスキップされました。');
     } else {
-      console.log('Google Calendarへの連携処理を開始します...');
+      console.log('Google Calendarへの連携処理（差分同期）を開始します...');
       const { google } = require('googleapis');
       const auth = new google.auth.GoogleAuth({
         keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
@@ -254,14 +260,74 @@ async function processMonth(page) {
         existingEvents.push(...(res.data.items || []));
         pageToken = res.data.nextPageToken;
       } while (pageToken);
-      console.log(`  既存イベント合計: ${existingEvents.length} 件`);
+      console.log(`  カレンダー上の既存イベント: ${existingEvents.length} 件`);
 
-      // --- 3. 期間内の既存イベントをすべて削除（古いデータ・キャンセル分を完全クリーンアップ）---
-      if (existingEvents.length > 0) {
-        console.log(`\n既存イベント ${existingEvents.length} 件をすべて削除中...`);
-        for (const ev of existingEvents) {
+      // --- 3. メモリ上の一意化 ---
+      const uniqueReservations = [];
+      const seenKey = new Set();
+      for (const res of allReservations) {
+        const key = `${res.fullDate}_${res.startTime}_${res.endTime}_${res.studio}_${res.title}`;
+        if (!seenKey.has(key)) {
+          seenKey.add(key);
+          uniqueReservations.push(res);
+        }
+      }
+
+      // --- 4. 差分照合（Reconciliation）アルゴリズム ---
+      // 既存イベントをキーマップ化（重複している既存イベントは自動的に削除リストへ）
+      const existingMap = new Map();
+      const toDeleteEvents = [];
+
+      for (const ev of existingEvents) {
+        // 手動登録イベント（[VOAT-SYNC] を含まないもの）は保護
+        if (!ev.description || !ev.description.includes(VOAT_SYNC_MARKER)) {
+          continue;
+        }
+
+        const start = (ev.start.dateTime || ev.start.date || '').substring(0, 16);
+        const end = (ev.end.dateTime || ev.end.date || '').substring(0, 16);
+        const summary = (ev.summary || '').trim();
+        const location = (ev.location || '').trim();
+        const key = `${start}_${end}_${summary}_${location}`;
+
+        if (!existingMap.has(key)) {
+          existingMap.set(key, ev);
+        } else {
+          // すでに同一内容のイベントが存在する（重複ゴミ）➔ 削除対象へ
+          toDeleteEvents.push(ev);
+        }
+      }
+
+      // 追加すべき新規予定の抽出
+      const toInsertReservations = [];
+      for (const res of uniqueReservations) {
+        const startISO = `${res.fullDate}T${res.startTime}`;
+        const endISO = `${res.fullDate}T${res.endTime}`;
+        const summary = res.title.trim();
+        const location = res.studio.trim();
+        const key = `${startISO}_${endISO}_${summary}_${location}`;
+
+        if (existingMap.has(key)) {
+          // すでにカレンダーに正規イベントが存在する ➔ そのまま保持
+          existingMap.delete(key);
+        } else {
+          // カレンダーに存在しない ➔ 新規追加
+          toInsertReservations.push(res);
+        }
+      }
+
+      // existingMap に残ったもの ➔ VOAT側でキャンセル・時間変更された古いイベントなので削除
+      for (const [key, ev] of existingMap.entries()) {
+        toDeleteEvents.push(ev);
+      }
+
+      // --- 5. 不要・重複・変更前イベントの削除 ---
+      if (toDeleteEvents.length > 0) {
+        console.log(`\n不要・重複・変更されたイベント ${toDeleteEvents.length} 件を削除中...`);
+        for (const ev of toDeleteEvents) {
           try {
             await calendar.events.delete({ calendarId, eventId: ev.id });
+            console.log(`  [削除] ${ev.start.dateTime || ev.start.date}: ${ev.summary}`);
           } catch (delErr) {
             if (delErr.code !== 410) {
               console.error(`  [削除エラー] ${ev.summary}: ${delErr.message}`);
@@ -270,21 +336,10 @@ async function processMonth(page) {
         }
       }
 
-      // --- 4. 最新のVOAT情報で全件新規登録 ---
-      if (allReservations.length > 0) {
-        // メモリ上での二重登録防止（安全ガード）
-        const uniqueReservations = [];
-        const seenKey = new Set();
-        for (const res of allReservations) {
-          const key = `${res.fullDate}_${res.startTime}_${res.endTime}_${res.studio}_${res.title}`;
-          if (!seenKey.has(key)) {
-            seenKey.add(key);
-            uniqueReservations.push(res);
-          }
-        }
-
-        console.log(`\n最新の予定 ${uniqueReservations.length} 件を登録中...`);
-        for (const res of uniqueReservations) {
+      // --- 6. 新規予定の登録 ---
+      if (toInsertReservations.length > 0) {
+        console.log(`\n新規・変更イベント ${toInsertReservations.length} 件を登録中...`);
+        for (const res of toInsertReservations) {
           const startDateTime = `${res.fullDate}T${res.startTime}:00+09:00`;
           const endDateTime = `${res.fullDate}T${res.endTime}:00+09:00`;
           const description = `${VOAT_SYNC_MARKER}\n種別: ${res.type}\n内容: ${res.content}\n生徒: ${res.students.join(', ')}`;
@@ -305,7 +360,7 @@ async function processMonth(page) {
           }
         }
       } else {
-        console.log('登録対象のレッスンはありませんでした。');
+        console.log('\n新規追加が必要なレッスンはありません（すべて最新同期済み）。');
       }
 
       console.log('\nGoogle Calendarへの連携が完了しました。');
