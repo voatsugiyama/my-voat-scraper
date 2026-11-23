@@ -25,20 +25,26 @@ const DAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
 
 /**
  * Google Sheets API 一時的エラー（429 / 5xx / 通信瞬断）の自動リトライ補助関数
+ * 429 (Quota exceeded per minute per user) は1分枠リセットを跨ぐよう長めのジッター付きバックオフを実行
  */
-async function withSheetRetry(fn, label, maxRetries = 3) {
+async function withSheetRetry(fn, label, maxRetries = 6) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       const code = err.code || err.status || 0;
-      const isRetryable = code === 429 || code === 500 || code === 502 || code === 503 || code === 504 ||
-        /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|Rate Limit|Quota exceeded|Backend Error/i.test(err.message || '');
+      const msg = err.message || '';
+      const isRateLimit = code === 429 || /Quota exceeded|Rate Limit/i.test(msg);
+      const isRetryable = isRateLimit || code === 500 || code === 502 || code === 503 || code === 504 ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|Backend Error/i.test(msg);
       if (!isRetryable || attempt >= maxRetries) {
         throw err;
       }
-      const waitMs = 1500 * Math.pow(2, attempt - 1);
-      console.warn(`    ⚠️ Google Sheets API 一時エラー (${label}) - ${waitMs}ms 後にリトライします (${attempt}/${maxRetries}): ${err.message}`);
+      const jitter = Math.floor(Math.random() * 5000);
+      const waitMs = isRateLimit
+        ? Math.min(12000 * attempt + jitter, 65000)
+        : 1500 * Math.pow(2, attempt - 1) + jitter;
+      console.warn(`    ⚠️ Google Sheets API 一時エラー (${label}) - ${Math.round(waitMs / 1000)}秒後にリトライします (${attempt}/${maxRetries}): ${msg}`);
       await new Promise(r => setTimeout(r, waitMs));
     }
   }
@@ -569,6 +575,29 @@ async function syncAllMonthsToSpreadsheet(daysDataMap, spreadsheetId, keyFilePat
         }
       }
     }
+  }
+
+  // 他講師の旧スクレイパーが月替わりで自動作成・再表示した旧シート名（スペースなし YYYY年M月）を自動で非表示化
+  const visibleLegacySheets = metaSheets.filter(
+    s => /^\d{4}年\d{1,2}月$/.test(s.properties.title) && !s.properties.hidden
+  );
+  if (visibleLegacySheets.length > 0) {
+    const hideRequests = visibleLegacySheets.map(s => ({
+      updateSheetProperties: {
+        properties: { sheetId: s.properties.sheetId, hidden: true },
+        fields: 'hidden',
+      },
+    }));
+    await withSheetRetry(
+      () => sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: hideRequests },
+      }),
+      'hideLegacySheets'
+    );
+    console.log(
+      `🙈 旧仕様のダミーシートを自動非表示化しました: ${visibleLegacySheets.map(s => s.properties.title).join(', ')}`
+    );
   }
 
   console.log('Googleスプレッドシートへの直接マトリックス同期がすべて完了しました！');
