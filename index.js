@@ -8,6 +8,34 @@ const { sendErrorAlert } = require('./src/notifier');
 const MONTHS_TO_PROCESS = 3; // 処理する月数（当月含む3ヶ月分）
 const KUMAMOTO_LOGIN_ID = 'beside.yuki.kumamoto@gmail.com';
 const KUMAMOTO_SPREADSHEET_ID = '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4';
+const TEACHER_SPREADSHEET_MAP_BY_REPO = {
+  'besideyukikumamoto/voatreservation': '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4',
+  'voat-fukuoka-inoue/my-voat-scraper': '1O-zmcECeN9YJXslShvdBvX9bvkp2Xr6VVe7c1ITQEeQ',
+  'voat-tsuchida/my-voat-scraper-': '1YtBmcakBiNXi14G6ppWCkUtJg4y_mOp7A842GkLPBiQ',
+  'voatfdance/rin': '18wlCdcAHQrcWm8ex9idsKUgbceX5OvYWg7sdWB-ldJU',
+  'voatfdance/tetsuo': '1vosGXphY-kenOVZN_1zApnPdw__kAajEC6GPyjR3Kz4',
+  'voatishii-creator/my-voat-scraper': '14_42uDfU0j4igX3Oq8FMKpcmcNV3lUq3jqrxk5e0B2A',
+  'voatmatsuo/my-voat-scraper': '1-dwniNIwIJGu8lEWz9CzgYfkWcdsHQIV9BLjtdnjuxo',
+  'voatmatsusaki/my-voat-scraper': '1_ZUeKvMJBCR0LwCm_Xz-HHc9uGxxL7F-gNTbluW_IyM',
+  'voatsakai-star/my-voat-scraper': '1DapzY8rRJE7q3ImliukGzR036rEvFPXYiPTX4KbyIVE',
+  'voatsetoguchi-stack/my-voat-scraper': '1HDz7JmHCMavgSRhtjWoIyKFzIwsvN3V1TFS7HAs5wL8',
+  'voatsone/my-voat-scraper': '1LNr_iUE3SoCwa1GB-fyvPlwJlv3sWPfKKQmp_hkpWGc',
+  'voatsugiyama/my-voat-scraper': '17-MrI7U-myygacfhnmrKPkIzVj7Oy6qUP6svLPqjVUs',
+};
+const TEACHER_SPREADSHEET_MAP_BY_CALENDAR = {
+  'f9d54c9faf1fee48e1b7bf2f8d55619e872b52502f5e80cb7c29545f9b5e884d@group.calendar.google.com': '1vwLDxLeLrUb6icuYU9M0w4feTPpNf_mPxRItHSS30s4',
+  '7c17519c1beee9804b1fc6f5ace58f8a36f78de24a29ab5971d09b75a14b766a@group.calendar.google.com': '1O-zmcECeN9YJXslShvdBvX9bvkp2Xr6VVe7c1ITQEeQ',
+  'voat.tsuchida@gmail.com': '1YtBmcakBiNXi14G6ppWCkUtJg4y_mOp7A842GkLPBiQ',
+  '36aebc5ea4e04bcd154939cdbfe69e76bc02b3200bf7e580ba2a291cc8cd8f8a@group.calendar.google.com': '18wlCdcAHQrcWm8ex9idsKUgbceX5OvYWg7sdWB-ldJU',
+  '0624241b60cc8949f6fd2748e46d55c06e75be38fa21cfa474487496b07b505d@group.calendar.google.com': '1vosGXphY-kenOVZN_1zApnPdw__kAajEC6GPyjR3Kz4',
+  'voat.ishii@gmail.com': '14_42uDfU0j4igX3Oq8FMKpcmcNV3lUq3jqrxk5e0B2A',
+  'voat.matsuo@gmail.com': '1-dwniNIwIJGu8lEWz9CzgYfkWcdsHQIV9BLjtdnjuxo',
+  'voat.matsusaki@gmail.com': '1_ZUeKvMJBCR0LwCm_Xz-HHc9uGxxL7F-gNTbluW_IyM',
+  'voat.sakai@gmail.com': '1DapzY8rRJE7q3ImliukGzR036rEvFPXYiPTX4KbyIVE',
+  'voat.setoguchi@gmail.com': '1HDz7JmHCMavgSRhtjWoIyKFzIwsvN3V1TFS7HAs5wL8',
+  'voat.sone@gmail.com': '1LNr_iUE3SoCwa1GB-fyvPlwJlv3sWPfKKQmp_hkpWGc',
+  'voat.sugiyama@gmail.com': '17-MrI7U-myygacfhnmrKPkIzVj7Oy6qUP6svLPqjVUs',
+};
 const KEY_FILE_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.SERVICE_ACCOUNT_PATH || path.join(__dirname, 'service-account.json');
 
 (async () => {
@@ -57,15 +85,28 @@ const KEY_FILE_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.
     // ----------------------------------------------------
     // Step 3: Google Sheets 直接マトリックス同期（休みグレー＆8pt固定＆手動グレー保護）
     // ※他講師のアカウントで隈元先生のスプレッドシートが上書きされるのを防ぐため、
-    //   隈元先生のアカウント時、または独自SPREADSHEET_IDが明示指定されている場合のみ実行
+    //   明示SPREADSHEET_ID ＞ リポジトリ別マップ ＞ カレンダーID別マップ の順で各講師専用IDを解決
     // ----------------------------------------------------
     const isKumamoto = (loginId.trim().toLowerCase() === KUMAMOTO_LOGIN_ID);
-    const targetSpreadsheetId = isKumamoto
-      ? (process.env.SPREADSHEET_ID || KUMAMOTO_SPREADSHEET_ID)
-      : (process.env.SPREADSHEET_ID && process.env.SPREADSHEET_ID !== KUMAMOTO_SPREADSHEET_ID ? process.env.SPREADSHEET_ID : '');
+    const repoKey = (process.env.GITHUB_REPOSITORY || '').trim().toLowerCase();
+    const calKey = (calendarId || '').trim().toLowerCase();
+    const mappedSpreadsheetId =
+      TEACHER_SPREADSHEET_MAP_BY_REPO[repoKey] ||
+      TEACHER_SPREADSHEET_MAP_BY_CALENDAR[calKey] ||
+      '';
+    const explicitSpreadsheetId = (process.env.SPREADSHEET_ID || '').trim();
+    const safeExplicitId =
+      explicitSpreadsheetId && (isKumamoto || explicitSpreadsheetId !== KUMAMOTO_SPREADSHEET_ID)
+        ? explicitSpreadsheetId
+        : '';
+    const safeMappedId =
+      mappedSpreadsheetId && (isKumamoto || mappedSpreadsheetId !== KUMAMOTO_SPREADSHEET_ID)
+        ? mappedSpreadsheetId
+        : '';
+    const targetSpreadsheetId = safeExplicitId || safeMappedId || (isKumamoto ? KUMAMOTO_SPREADSHEET_ID : '');
 
     if (targetSpreadsheetId) {
-      console.log('\n【Step 3】Googleスプレッドシートへの直接同期を開始します（手動グレー保護＆隔離対応版）...');
+      console.log(`\n【Step 3】Googleスプレッドシート (${targetSpreadsheetId}) への直接同期を開始します（手動グレー保護＆隔離対応版）...`);
       await syncAllMonthsToSpreadsheet(daysDataMap, targetSpreadsheetId, KEY_FILE_PATH, MONTHS_TO_PROCESS);
     } else {
       console.log('\n【Step 3】スプレッドシートIDが未設定のため、Google Calendar同期のみで完了します。');
